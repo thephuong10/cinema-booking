@@ -11,4 +11,5 @@ func RegisterShowTimeRoute(rg *gin.RouterGroup, ss services.IShowTimeService) {
 
 	group.GET("/:movieId", handlers.GetShowTimeByMovieId(ss))
 	group.GET("/seats/:showtimeId", handlers.GetSeatsByShowTimeId(ss))
+	group.POST("/", handlers.CreateShowTime(ss))
 }

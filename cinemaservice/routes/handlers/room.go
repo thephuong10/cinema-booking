@@ -4,13 +4,15 @@ import (
 	"cinemaservice/models/requests"
 	"cinemaservice/models/responses"
 	"cinemaservice/services"
+	"fmt"
 	"github.com/gin-gonic/gin"
 	"net/http"
 )
 
 func GetRoomById(rs services.IRoomService) gin.HandlerFunc {
 	return func(ctx *gin.Context) {
-		id := ctx.Query("id")
+		id := ctx.Param("id")
+		fmt.Println("id", id)
 		room, err := rs.FindById(id)
 		if err != nil {
 			ctx.JSON(http.StatusInternalServerError, gin.H{

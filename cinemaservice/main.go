@@ -18,7 +18,7 @@ func main() {
 
 	routes.RegisterRouters(r, cs, rs)
 
-	if err := r.Run(":8081"); err != nil {
+	if err := r.Run(":8083"); err != nil {
 		log.Fatal("Failed to start the server: ", err)
 	}
 

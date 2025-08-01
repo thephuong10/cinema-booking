@@ -1,7 +1,7 @@
 package configs
 
 import (
-	"cinemaservice/models/entities"
+	"bookingservice/models/entities"
 	"gorm.io/driver/mysql"
 	"gorm.io/gorm"
 	"log"
@@ -10,7 +10,7 @@ import (
 
 func InitDB() *gorm.DB {
 
-	dsn := "root:@tcp(127.0.0.1:3306)/cinemaservice?parseTime=true"
+	dsn := "root:@tcp(127.0.0.1:3306)/bookingservicedb?parseTime=true"
 
 	db, err := gorm.Open(mysql.Open(dsn), &gorm.Config{})
 
@@ -35,7 +35,7 @@ func InitDB() *gorm.DB {
 }
 
 func autoMigrate(db *gorm.DB) {
-	err := db.AutoMigrate(&entities.Cinema{}, &entities.Room{})
+	err := db.AutoMigrate(&entities.Bill{}, &entities.Ticket{})
 	if err != nil {
 		log.Fatalf("Migration failed: %v", err)
 	} else {

@@ -10,7 +10,7 @@ import (
 
 func InitDB() *gorm.DB {
 
-	dsn := "root:@tcp(127.0.0.1:3306)/stsrvdb?parseTime=true"
+	dsn := "root:@tcp(127.0.0.1:3306)/showtimeservicedb?parseTime=true"
 
 	db, err := gorm.Open(mysql.Open(dsn), &gorm.Config{})
 

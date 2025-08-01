@@ -6,11 +6,13 @@ import (
 	"errors"
 	"fmt"
 	"github.com/go-resty/resty/v2"
+	"github.com/google/uuid"
 	"github.com/redis/go-redis/v9"
 	"gorm.io/gorm"
 	"log"
 	"showtimeservice/converters"
 	"showtimeservice/models/entities"
+	"showtimeservice/models/requests"
 	"showtimeservice/models/responses"
 	"sync"
 	"time"
@@ -19,6 +21,7 @@ import (
 type IShowTimeService interface {
 	FindByMovieId(movieId string) ([]responses.ShowTime, error)
 	FindSeatsByShowTimeId(id string) ([]responses.Seats, error)
+	Create(req *requests.CreateShowTime) (*responses.ShowTime, error)
 }
 
 type showTimeService struct {
@@ -50,10 +53,12 @@ func (ss *showTimeService) FindByMovieId(movieId string) ([]responses.ShowTime, 
 func (ss *showTimeService) FindSeatsByShowTimeId(id string) ([]responses.Seats, error) {
 	cacheKey := fmt.Sprintf("seats:showtime:%s", id)
 	lockKey := fmt.Sprintf("lock:%s", id)
+	sessionId := uuid.New().String()
 
 	cached, err := ss.rdb.Get(context.Background(), cacheKey).Result()
 
 	if err == nil && cached != "" {
+		fmt.Printf("Get Data from Cache")
 		var seats []responses.Seats
 		if err := json.Unmarshal([]byte(cached), &seats); err == nil {
 			return seats, nil
@@ -63,6 +68,8 @@ func (ss *showTimeService) FindSeatsByShowTimeId(id string) ([]responses.Seats, 
 	gotLock, _ := ss.rdb.SetNX(context.Background(), lockKey, "locking", 5*time.Second).Result()
 
 	if gotLock {
+
+		fmt.Printf("Acquire the lock : " + sessionId + "\n")
 
 		defer ss.rdb.Del(context.Background(), lockKey)
 
@@ -84,8 +91,12 @@ func (ss *showTimeService) FindSeatsByShowTimeId(id string) ([]responses.Seats, 
 
 		return seats, nil
 	} else {
+
+		fmt.Printf("Waiting..... : " + sessionId + "\n")
+
 		for i := 0; i < 5; i++ {
-			time.Sleep(100 * time.Microsecond)
+			time.Sleep(1 * time.Second)
+			fmt.Printf("Retrying.... : " + sessionId + "\n")
 			cached, err := ss.rdb.Get(context.Background(), cacheKey).Result()
 			if err == nil && cached != "" {
 				var seats []responses.Seats
@@ -100,7 +111,7 @@ func (ss *showTimeService) FindSeatsByShowTimeId(id string) ([]responses.Seats, 
 }
 
 func (ss *showTimeService) buildSeatsByShowtimeId(id string) ([]responses.Seats, error) {
-
+	fmt.Printf("Get Data from DB")
 	var st entities.ShowTimes
 	err := ss.db.Where("id = ?", id).First(&st).Error
 	if err != nil {
@@ -140,12 +151,26 @@ func (ss *showTimeService) buildSeatsByShowtimeId(id string) ([]responses.Seats,
 	return seats, nil
 }
 
+func (ss *showTimeService) Create(req *requests.CreateShowTime) (*responses.ShowTime, error) {
+	st := converters.ConvertCreateShowTimeRequestToEntity(req)
+
+	err := ss.db.Debug().Create(&st).Error
+
+	if err != nil {
+		log.Printf("Couldn't insert data to DB")
+		return nil, err
+	}
+
+	return converters.ConvertShowTimeEntityToResponse(&st), err
+
+}
+
 func fetchRoomInfo(roomID string) (responses.Rooms, error) {
 	var room responses.Rooms
 	client := resty.New()
 	resp, err := client.R().
 		SetResult(&room).
-		Get("http://localhost:8082/cinemaserivce/api/room/" + roomID)
+		Get("http://127.0.0.1:8083/cinemaservice/api/room/" + roomID)
 
 	if err != nil {
 		return room, fmt.Errorf("couldn't fetch data from cinemaserivce: %v", err)
@@ -161,7 +186,7 @@ func fetchBookedTickets(showTimeID string) ([]responses.Tickets, error) {
 	client := resty.New()
 	resp, err := client.R().
 		SetResult(&tickets).
-		Get("http://localhost:8082/bookingservice/api/ticket/" + showTimeID)
+		Get("http://127.0.0.1:8084/bookingservice/api/ticket/showtime/" + showTimeID)
 
 	if err != nil {
 		return nil, fmt.Errorf("couldn't fetch data from bookingservice: %v", err)

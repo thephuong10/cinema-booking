@@ -10,7 +10,7 @@ import (
 
 func GetCinemaById(cs services.ICinemaService) gin.HandlerFunc {
 	return func(ctx *gin.Context) {
-		id := ctx.Query("id")
+		id := ctx.Param("id")
 		cinema, err := cs.FindById(id)
 		if err != nil {
 			ctx.JSON(http.StatusInternalServerError, gin.H{

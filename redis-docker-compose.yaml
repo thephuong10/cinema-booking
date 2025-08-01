@@ -1,0 +1,26 @@
+version: '3.8'
+
+services:
+  redis1:
+    image: redis/redis-stack:latest
+    container_name: showtime-redis
+    restart: always
+    ports:
+      - "6379:6379"
+      - "8001:8001"
+    volumes:
+      - redis1-data:/data
+
+  redis2:
+    image: redis/redis-stack:latest
+    container_name: booking-redis
+    restart: always
+    ports:
+      - "6380:6379"
+      - "8002:8001"
+    volumes:
+      - redis2-data:/data
+
+volumes:
+  redis1-data:
+  redis2-data:

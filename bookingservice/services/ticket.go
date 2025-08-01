@@ -1,162 +1,41 @@
 package services
 
 import (
-	"bookingservice/configs"
+	"bookingservice/converters"
 	"bookingservice/models/entities"
-	"bookingservice/models/messages"
 	"bookingservice/models/requests"
+	"bookingservice/models/responses"
 	"context"
-	"encoding/json"
 	"fmt"
-	"github.com/google/uuid"
 	"github.com/redis/go-redis/v9"
 	"gorm.io/gorm"
+	"log"
+	"strconv"
+	"sync"
 	"time"
 )
 
 type ITicketService interface {
+	CreateTickets(tickets []requests.CreateTicket) (bool, error)
+	FindAllByShowTimeId(showTimeId string) []responses.TicketResponse
 }
 
 type ticketService struct {
 	db  *gorm.DB
 	rdb *redis.Client
-	kf  *configs.KafkaProducer
+	//kf  *configs.KafkaProducer
 }
 
-func buildSeatCacheKeys(tickets []requests.CreateTicket) []string {
-	var keys []string
-	for _, ticket := range tickets {
-		key := fmt.Sprintf("ticket:%s:seat:%d:%d:available", ticket.ShowTimeId, ticket.Row, ticket.Column)
-		keys = append(keys, key)
+func NewTicketService(db *gorm.DB, rdb *redis.Client) ITicketService {
+	return &ticketService{
+		db, rdb,
 	}
-	return keys
-}
-
-func buildSeatsLockKey(showTimeId string, seats [][2]int) string {
-	lockKey := fmt.Sprintf("lock:ticket:%s:seats", showTimeId)
-	for _, seat := range seats {
-		lockKey += fmt.Sprintf(":%d:%d", seat[0], seat[1])
-	}
-	return lockKey
-}
-
-func (ts *ticketService) acquireLockAndCheckDB(
-	lockKey, showTimeId string,
-	missTickets []entities.Ticket, missSeats [][2]int,
-) (bool, error) {
-	ctx := context.Background()
-	locked, err := ts.rdb.SetNX(ctx, lockKey, "locked", 5*time.Second).Result()
-	if err != nil {
-		return false, err
-	}
-	if !locked {
-		return false, nil
-	}
-	defer ts.rdb.Del(ctx, lockKey)
-
-	var soldTickets []entities.Ticket
-	err = ts.db.Model(&entities.Ticket{}).
-		Where("show_time_id= ?", showTimeId).
-		Where("(row, column) IN ?", missSeats).
-		Find(&soldTickets).Error
-	if err != nil {
-		return false, err
-	}
-
-	soldTicketMap := make(map[string]bool)
-	for _, ticket := range soldTickets {
-		key := fmt.Sprintf("%d-%d", ticket.Row, ticket.Column)
-		soldTicketMap[key] = true
-	}
-
-	pipe := ts.rdb.Pipeline()
-	hasSold := false
-	for _, ticket := range missTickets {
-		cacheKey := fmt.Sprintf("ticket:%s:seat:%d:%d:available", ticket.ShowTimeId, ticket.Row, ticket.Column)
-		key := fmt.Sprintf("%d-%d", ticket.Row, ticket.Column)
-		available := "true"
-		if soldTicketMap[key] {
-			available = "false"
-			hasSold = true
-		}
-		pipe.Set(ctx, cacheKey, available, 5*time.Minute)
-	}
-	_, _ = pipe.Exec(ctx)
-
-	return !hasSold, nil
-}
-
-func (ts *ticketService) retryPollSeatCache(keys []string, nRetry int, delay time.Duration) (bool, error) {
-	ctx := context.Background()
-	for i := 0; i < nRetry; i++ {
-		time.Sleep(delay)
-		statuses, err := ts.rdb.MGet(ctx, keys...).Result()
-		if err != nil {
-			return false, err
-		}
-		found := true
-		for _, v := range statuses {
-			if v == "false" {
-				return false, nil
-			}
-			if v == nil {
-				found = false
-			}
-		}
-		if found {
-			return true, nil
-		}
-	}
-	return false, fmt.Errorf("system busy, please try again")
-}
-
-func detectCacheMiss(tickets []requests.CreateTicket, statuses []interface{}) ([]entities.Ticket, [][2]int) {
-	var missTickets []entities.Ticket
-	var missSeats [][2]int
-	for i, status := range statuses {
-		if status == "false" {
-			return nil, nil
-		}
-		if status == nil {
-			missTickets = append(missTickets, entities.Ticket{
-				ShowTimeId: tickets[i].ShowTimeId,
-				Row:        tickets[i].Row,
-				Column:     tickets[i].Column,
-			})
-			missSeats = append(missSeats, [2]int{tickets[i].Row, tickets[i].Column})
-		}
-	}
-	return missTickets, missSeats
-}
-
-func (ts *ticketService) isSeatsAvailable(tickets []requests.CreateTicket) (bool, error) {
-	ctx := context.Background()
-	keys := buildSeatCacheKeys(tickets)
-
-	statuses, err := ts.rdb.MGet(ctx, keys...).Result()
-	if err != nil {
-		return false, err
-	}
-
-	missTickets, missSeats := detectCacheMiss(tickets, statuses)
-	if len(missTickets) == 0 {
-		return true, nil
-	}
-
-	lockKey := buildSeatsLockKey(tickets[0].ShowTimeId, missSeats)
-
-	ok, err := ts.acquireLockAndCheckDB(lockKey, tickets[0].ShowTimeId, missTickets, missSeats)
-	if err != nil {
-		return false, err
-	}
-	if ok {
-		return true, nil
-	}
-	return ts.retryPollSeatCache(keys, 5, 100*time.Millisecond)
 }
 
 func (ts *ticketService) CreateTickets(tickets []requests.CreateTicket) (bool, error) {
+
 	ok, err := ts.isSeatsAvailable(tickets)
+
 	if err != nil {
 		return false, err
 	}
@@ -164,35 +43,184 @@ func (ts *ticketService) CreateTickets(tickets []requests.CreateTicket) (bool, e
 		return false, nil
 	}
 	var cacheKeys []string
+
 	for _, ticket := range tickets {
-		cacheKey := fmt.Sprintf("ticket:%s:seat:%d:%d", ticket.ShowTimeId, ticket.Row, ticket.Column)
+		cacheKey := fmt.Sprintf("showtime:%s:seat:%d:%d:hold", ticket.ShowTimeId, ticket.Row, ticket.Column)
 		cacheKeys = append(cacheKeys, cacheKey)
 		suc, err := ts.rdb.SetNX(context.Background(), cacheKey, ticket.UserId, 5*time.Minute).Result()
 		if err != nil {
 			return false, err
 		}
 		if !suc {
-			for _, key := range cacheKeys {
-				ts.rdb.Del(context.Background(), key)
-			}
+			ts.rdb.Del(context.Background(), cacheKeys...)
 			return false, nil
 		}
 	}
 
-	message, err := json.Marshal(messages.MessageWrapper[messages.HoldingTicket]{
-		ID:       uuid.New().String(),
-		Type:     "HoldingTicket",
-		CreateAt: time.Now(),
-		Payload: messages.HoldingTicket{
-			Tickets: cacheKeys,
-		},
-	})
-	if err == nil {
-		err = ts.kf.SendMessage("topic_showtime", string(message))
+	go func() {
+		showtimeCacheId := fmt.Sprintf("showtime:%s:seats", tickets[0].ShowTimeId)
+		seats := make(map[string]string)
+		for _, ticket := range tickets {
+			key := fmt.Sprintf("%d:%d", ticket.Row, ticket.Column)
+			seats[key] = "1"
+		}
+		ts.rdb.HSet(context.Background(), showtimeCacheId, seats)
+		ts.rdb.Expire(context.Background(), showtimeCacheId, 5*time.Minute)
+	}()
+
+	//message, err := json.Marshal(messages.MessageWrapper[messages.HoldingTicket]{
+	//	ID:       uuid.New().String(),
+	//	Type:     "HoldingTicket",
+	//	CreateAt: time.Now(),
+	//	Payload: messages.HoldingTicket{
+	//		Tickets: cacheKeys,
+	//	},
+	//})
+	//if err == nil {
+	//	err = ts.kf.SendMessage("topic_showtime", string(message))
+	//	if err != nil {
+	//		fmt.Errorf("kafka error: %v", err)
+	//	}
+	//}
+
+	return true, nil
+}
+
+func (ts *ticketService) FindAllByShowTimeId(showTimeId string) []responses.TicketResponse {
+
+	wg := sync.WaitGroup{}
+	wg.Add(2)
+
+	var (
+		solds  []entities.Ticket
+		result []entities.Ticket
+		holds  map[string]string
+	)
+
+	go func() {
+		err := ts.db.Debug().Where("show_time_id= ?", showTimeId).Find(&solds).Error
 		if err != nil {
-			fmt.Errorf("kafka error: %v", err)
+			log.Println("Redis Error : ", err)
+		}
+	}()
+
+	go func() {
+		var err error
+		holds, err = ts.findAllByShowTimeIdFromCache(showTimeId)
+		if err != nil {
+			log.Println("Redis Error : ", err)
+			holds = make(map[string]string)
+		}
+	}()
+
+	wg.Wait()
+
+	for _, ticket := range solds {
+		key := fmt.Sprintf("%d:%d", ticket.Row, ticket.Column)
+		if holds[key] != "1" {
+			result = append(result, ticket)
+		}
+	}
+
+	for key, val := range holds {
+		if val == "1" {
+			var row, column int
+			_, _ = fmt.Sscanf(key, "%d:%d", &row, &column)
+			result = append(result, entities.Ticket{
+				Row:        row,
+				Column:     column,
+				ShowTimeId: showTimeId,
+			})
+		}
+	}
+
+	return converters.ConvertTicketEntityToResponse(result)
+}
+
+func (ts *ticketService) acquireLockAndRebuildCache(showtimeCacheId string, showTimeId string) (map[string]string, error) {
+	lockKey := "lock:build:seats"
+	acquire, _ := ts.rdb.SetNX(context.Background(), lockKey, 1, 5*time.Second).Result()
+	if acquire {
+
+		var soldTickets []entities.Ticket
+
+		err := ts.db.Debug().Where("show_time_id= ?", showTimeId).Find(&soldTickets).Error
+
+		if err != nil {
+			log.Println("DB err ", err)
+			return nil, err
+		}
+
+		result := make(map[string]string)
+
+		for _, ticket := range soldTickets {
+			key := fmt.Sprintf("%d:%d", ticket.Row, ticket.Column)
+			result[key] = "1"
+		}
+
+		ts.rdb.HSet(context.Background(), showtimeCacheId, result)
+
+		ts.rdb.Expire(context.Background(), showtimeCacheId, 5*time.Minute)
+
+		ts.rdb.Del(context.Background(), lockKey)
+
+		return result, nil
+
+	} else {
+		for i := 0; i < 5; i++ {
+			time.Sleep(1 * time.Second)
+			seats, _ := ts.rdb.HGetAll(context.Background(), showtimeCacheId).Result()
+			if len(seats) > 0 {
+				return seats, nil
+			}
+		}
+
+		return nil, fmt.Errorf("system busy, please try again")
+	}
+
+}
+
+func (ts *ticketService) findAllByShowTimeIdFromCache(showTimeId string) (map[string]string, error) {
+	showtimeCacheId := fmt.Sprintf("showtime:%s:seats", showTimeId)
+	seats, err := ts.rdb.HGetAll(context.Background(), showtimeCacheId).Result()
+
+	if err != nil {
+		log.Println("Redis err ", err)
+		return nil, err
+	}
+
+	if len(seats) == 0 {
+		seats, err = ts.acquireLockAndRebuildCache(showtimeCacheId, showTimeId)
+
+		if err != nil {
+			return nil, err
+		}
+
+	}
+
+	return seats, nil
+}
+
+func (ts *ticketService) isSeatsAvailable(tickets []requests.CreateTicket) (bool, error) {
+
+	seats, err := ts.findAllByShowTimeIdFromCache(tickets[0].ShowTimeId)
+
+	if err != nil {
+		log.Println("Redis err ", err)
+		return false, err
+	}
+
+	for _, seat := range tickets {
+		key := fmt.Sprintf("%d:%d", seat.Row, seat.Column)
+		val := seats[key]
+		if val != "" {
+			num, _ := strconv.Atoi(val)
+			if num == 1 {
+				return false, nil
+			}
 		}
 	}
 
 	return true, nil
+
 }

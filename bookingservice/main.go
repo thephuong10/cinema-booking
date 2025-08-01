@@ -1,5 +1,14 @@
 package main
 
+import (
+	"bookingservice/configs"
+	"bookingservice/routes"
+	"bookingservice/services"
+
+	"github.com/gin-gonic/gin"
+	"log"
+)
+
 func main() {
 
 	//kafkaProducer, err := service.NewKafkaProducer()
@@ -13,5 +22,19 @@ func main() {
 	//}
 	//
 	//kafkaConsumer.ConsumeMessages()
+
+	r := gin.Default()
+
+	db := configs.InitDB()
+
+	rdb := configs.ConnectRedis()
+
+	ts := services.NewTicketService(db, rdb)
+
+	routes.RegisterRouters(r, ts)
+
+	if err := r.Run(":8084"); err != nil {
+		log.Fatal("Failed to start the server: ", err)
+	}
 
 }
